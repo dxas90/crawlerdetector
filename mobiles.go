@@ -6,18 +6,31 @@ import (
 	"strings"
 )
 
-// PiwikMobilesList is list of most used mobiles
+// PiwikMobilesList returns a regex pattern of mobile devices from Piwik dataset.
+// Returns an empty pattern "()" if unmarshaling fails.
 func PiwikMobilesList() string {
-	mobiles := make([]Piwik, 1)
-	err := json.Unmarshal(mobilesConfig, &mobiles)
-	if err != nil { // failed decode the data
-		log.Println(err.Error())
+	var mobiles []Piwik
+	if err := json.Unmarshal(mobilesConfig, &mobiles); err != nil {
+		log.Printf("crawlerdetector: failed to unmarshal mobiles config: %v", err)
+		return "()" // Return empty pattern on error
 	}
-	strs := make([]string, len(mobiles))
-	for i, v := range mobiles {
-		strs[i] = v.String()
+
+	if len(mobiles) == 0 {
+		return "()"
 	}
-	return "(" + strings.Join(strs, "|") + ")"
+
+	patterns := make([]string, 0, len(mobiles))
+	for _, mobile := range mobiles {
+		if mobile.Regex != "" {
+			patterns = append(patterns, mobile.Regex)
+		}
+	}
+
+	if len(patterns) == 0 {
+		return "()"
+	}
+
+	return "(" + strings.Join(patterns, "|") + ")"
 }
 
 // ShortMobilesList is a small list of most used mobiles

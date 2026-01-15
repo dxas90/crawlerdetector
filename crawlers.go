@@ -6,18 +6,31 @@ import (
 	"strings"
 )
 
-// PiwikCrawlersList is list of crawlers/spiders/bots by Piwik
+// PiwikCrawlersList returns a regex pattern of crawlers/spiders/bots from Piwik dataset.
+// Returns an empty pattern "()" if unmarshaling fails.
 func PiwikCrawlersList() string {
-	bots := make([]Piwik, 1)
-	err := json.Unmarshal(botConfig, &bots)
-	if err != nil { // failed decode the data
-		log.Println(err.Error())
+	var bots []Piwik
+	if err := json.Unmarshal(botConfig, &bots); err != nil {
+		log.Printf("crawlerdetector: failed to unmarshal bot config: %v", err)
+		return "()" // Return empty pattern on error
 	}
-	strs := make([]string, len(bots))
-	for i, v := range bots {
-		strs[i] = v.String()
+
+	if len(bots) == 0 {
+		return "()"
 	}
-	return "(" + strings.Join(strs, "|") + ")"
+
+	patterns := make([]string, 0, len(bots))
+	for _, bot := range bots {
+		if bot.Regex != "" {
+			patterns = append(patterns, bot.Regex)
+		}
+	}
+
+	if len(patterns) == 0 {
+		return "()"
+	}
+
+	return "(" + strings.Join(patterns, "|") + ")"
 }
 
 // ShortCrawlersList is list of crawlers/spiders/bots

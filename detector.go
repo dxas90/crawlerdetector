@@ -5,7 +5,21 @@ import (
 	"sync"
 )
 
-var w sync.WaitGroup
+// Compiled regex cache with lazy initialization
+var (
+	crawlersRegex     *regexp.Regexp
+	mobilesRegex      *regexp.Regexp
+	exclusionsRegex   *regexp.Regexp
+	piwikCrawlersRx   *regexp.Regexp
+	piwikMobilesRx    *regexp.Regexp
+	shortCrawlersRx   *regexp.Regexp
+	shortMobilesRx    *regexp.Regexp
+	shortExclusionsRx *regexp.Regexp
+
+	compileOnce      sync.Once
+	piwikCompileOnce sync.Once
+	shortCompileOnce sync.Once
+)
 
 // Piwik struct to parse the yml
 type Piwik struct {
@@ -29,118 +43,142 @@ type CrawlerDetector struct {
 	Mobile     bool
 }
 
-// New returns a new initialized CrawlerDetector
+// New returns a new initialized CrawlerDetector with full pattern lists.
+// Uses lazy compilation for optimal performance.
 func New() *CrawlerDetector {
-	crw := &CrawlerDetector{
-		Crawlers:   regexp.MustCompile(CrawlersList()),
-		Mobiles:    regexp.MustCompile(MobilesList()),
-		Exclusions: regexp.MustCompile(ExclusionsList()),
-		Matched:    []string{},
-		Browser:    false,
-		Mobile:     false,
-		Crawler:    false,
+	compileOnce.Do(func() {
+		crawlersRegex = regexp.MustCompile(CrawlersList())
+		mobilesRegex = regexp.MustCompile(MobilesList())
+		exclusionsRegex = regexp.MustCompile(ExclusionsList())
+	})
+
+	return &CrawlerDetector{
+		Crawlers:   crawlersRegex,
+		Mobiles:    mobilesRegex,
+		Exclusions: exclusionsRegex,
+		Matched:    make([]string, 0),
 	}
-	return crw
 }
 
-// NewPiwik returns a new initialized CrawlerDetector from Piwik
+// NewPiwik returns a new initialized CrawlerDetector from Piwik patterns.
+// Uses Piwik bot/mobile lists with short exclusions.
 func NewPiwik() *CrawlerDetector {
-	crw := &CrawlerDetector{
-		Crawlers:   regexp.MustCompile(PiwikCrawlersList()),
-		Mobiles:    regexp.MustCompile(PiwikMobilesList()),
-		Exclusions: regexp.MustCompile(ShortExclusionsList()),
-		Matched:    []string{},
-		Browser:    false,
-		Mobile:     false,
-		Crawler:    false,
+	piwikCompileOnce.Do(func() {
+		piwikCrawlersRx = regexp.MustCompile(PiwikCrawlersList())
+		piwikMobilesRx = regexp.MustCompile(PiwikMobilesList())
+		if shortExclusionsRx == nil {
+			shortExclusionsRx = regexp.MustCompile(ShortExclusionsList())
+		}
+	})
+
+	return &CrawlerDetector{
+		Crawlers:   piwikCrawlersRx,
+		Mobiles:    piwikMobilesRx,
+		Exclusions: shortExclusionsRx,
+		Matched:    make([]string, 0),
 	}
-	return crw
 }
 
-// NewShort returns a new basic initialized CrawlerDetector
+// NewShort returns a new basic initialized CrawlerDetector with minimal patterns.
+// Fastest initialization and detection for performance-critical applications.
 func NewShort() *CrawlerDetector {
-	crw := &CrawlerDetector{
-		Crawlers:   regexp.MustCompile(ShortCrawlersList()),
-		Mobiles:    regexp.MustCompile(ShortMobilesList()),
-		Exclusions: regexp.MustCompile(ShortExclusionsList()),
-		Matched:    []string{},
-		Browser:    false,
-		Mobile:     false,
-		Crawler:    false,
+	shortCompileOnce.Do(func() {
+		shortCrawlersRx = regexp.MustCompile(ShortCrawlersList())
+		shortMobilesRx = regexp.MustCompile(ShortMobilesList())
+		shortExclusionsRx = regexp.MustCompile(ShortExclusionsList())
+	})
+
+	return &CrawlerDetector{
+		Crawlers:   shortCrawlersRx,
+		Mobiles:    shortMobilesRx,
+		Exclusions: shortExclusionsRx,
+		Matched:    make([]string, 0),
 	}
-	return crw
 }
 
-// Parse is to perform all operations by user agent
+// Parse performs all detection operations concurrently on the user agent.
+// This method is thread-safe and can be called concurrently.
 func (cd *CrawlerDetector) Parse(userAgent string) *CrawlerDetector {
-	w.Add(3)
+	var wg sync.WaitGroup
+	wg.Add(3)
+
 	go func() {
+		defer wg.Done()
 		cd.Browser = (len(cd.Exclusions.ReplaceAllString(userAgent, "")) == 0)
-		defer w.Done()
 	}()
+
 	go func() {
-		cd.Mobile = (len(cd.Mobiles.FindAllString(userAgent, -1)) != 0)
-		defer w.Done()
+		defer wg.Done()
+		matches := cd.Mobiles.FindAllString(userAgent, -1)
+		cd.Mobile = len(matches) != 0
 	}()
+
 	go func() {
-		cd.Crawler = (len(cd.Crawlers.FindAllString(userAgent, -1)) != 0)
-		defer w.Done()
+		defer wg.Done()
+		matches := cd.Crawlers.FindAllString(userAgent, -1)
+		cd.Crawler = len(matches) != 0
+		if cd.Crawler {
+			cd.Matched = matches
+		}
 	}()
-	w.Wait()
+
+	wg.Wait()
 	return cd
 }
 
-// ParseUnsafe is to perform all browser and mobile operations by user agent but if not is a browser we asume that is a crawler
+// ParseUnsafe performs browser and mobile detection concurrently.
+// Unlike Parse(), this assumes any non-browser is a crawler.
+// This method is thread-safe and can be called concurrently.
 func (cd *CrawlerDetector) ParseUnsafe(userAgent string) *CrawlerDetector {
-	w.Add(2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	go func() {
+		defer wg.Done()
 		cd.IsCrawler(userAgent)
-		defer w.Done()
 	}()
+
 	go func() {
+		defer wg.Done()
 		cd.IsMobile(userAgent)
-		defer w.Done()
 	}()
-	w.Wait()
+
+	wg.Wait()
 	return cd
 }
 
-// IsCrawler is detect crawlers/spiders/bots by user agent
+// IsCrawler detects crawlers/spiders/bots by user agent.
+// Returns false if the user agent matches browser exclusion patterns.
+// Populates Matched field with detected crawler patterns.
 func (cd *CrawlerDetector) IsCrawler(userAgent string) bool {
-	cd.Crawler = false
+	// Browser exclusion check
 	if cd.IsExclusion(userAgent) {
+		cd.Crawler = false
+		cd.Matched = nil
 		return false
 	}
-	cd.Matched = cd.Crawlers.FindAllString(userAgent, -1)
 
-	if len(cd.Matched) != 0 {
-		cd.Crawler = true
-	}
+	// Find crawler patterns
+	cd.Matched = cd.Crawlers.FindAllString(userAgent, -1)
+	cd.Crawler = len(cd.Matched) > 0
 
 	return cd.Crawler
 }
 
-// IsMobile is detect mobile device by user agent
+// IsMobile detects mobile devices by user agent.
+// Populates Matched field with detected mobile patterns.
 func (cd *CrawlerDetector) IsMobile(userAgent string) bool {
-	cd.Mobile = false
 	cd.Matched = cd.Mobiles.FindAllString(userAgent, -1)
-
-	if len(cd.Matched) != 0 {
-		cd.Mobile = true
-	}
-
+	cd.Mobile = len(cd.Matched) > 0
 	return cd.Mobile
 }
 
-// IsExclusion is detect exclusion from user agent
+// IsExclusion checks if the user agent matches browser exclusion patterns.
+// Returns true if the entire user agent consists of exclusion patterns (is a browser).
 func (cd *CrawlerDetector) IsExclusion(userAgent string) bool {
-	cd.Browser = false
-	isExclusion := cd.Exclusions.ReplaceAllString(userAgent, "")
-
-	if len(isExclusion) == 0 {
-		cd.Browser = true
-	}
-
+	// If removing all exclusion patterns leaves nothing, it's a browser
+	remaining := cd.Exclusions.ReplaceAllString(userAgent, "")
+	cd.Browser = len(remaining) == 0
 	return cd.Browser
 }
 
